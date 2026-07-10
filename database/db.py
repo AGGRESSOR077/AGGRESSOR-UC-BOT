@@ -1,4 +1,3 @@
-
 """
 AGGRESSOR UC BOT - Database boshqaruv moduli.
 
@@ -8,7 +7,8 @@ aiosqlite kutubxonasi orqali asinxron tarzda ishlaydi.
 """
 
 import os
-from typing import List, Optional
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, List, Optional
 
 import aiosqlite
 
@@ -32,12 +32,25 @@ class Database:
         if directory and not os.path.exists(directory):
             os.makedirs(directory, exist_ok=True)
 
-    async def _connect(self) -> aiosqlite.Connection:
-        """Yangi database ulanishini ochadi va Row factory'ni sozlaydi."""
+    @asynccontextmanager
+    async def _connect(self) -> AsyncIterator[aiosqlite.Connection]:
+        """
+        Yangi database ulanishini ochadigan asinxron kontekst menejeri.
+
+        `aiosqlite.connect()` o'zi ham asinxron kontekst menejeri
+        bo'lgani uchun, uni ikkinchi marta `async with await ...`
+        ko'rinishida ishlatish "threads can only be started once"
+        xatosiga olib keladi. Shu sababli bu yerda ulanish ochilib,
+        `yield` orqali chaqiruvchiga uzatiladi va `finally` blokida
+        albatta yopiladi.
+        """
         connection = await aiosqlite.connect(self.db_path)
         connection.row_factory = aiosqlite.Row
-        await connection.execute("PRAGMA foreign_keys = ON;")
-        return connection
+        try:
+            await connection.execute("PRAGMA foreign_keys = ON;")
+            yield connection
+        finally:
+            await connection.close()
 
     # ==========================================================
     # JADVALLARNI YARATISH
@@ -45,7 +58,7 @@ class Database:
 
     async def create_tables(self) -> None:
         """Barcha kerakli jadvallarni (agar mavjud bo'lmasa) yaratadi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS users (
@@ -129,7 +142,7 @@ class Database:
         phone_number: Optional[str] = None,
     ) -> None:
         """Yangi foydalanuvchini qo'shadi. Agar mavjud bo'lsa, hech narsa qilmaydi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             existing = await conn.execute(
                 "SELECT id FROM users WHERE telegram_id = ?", (telegram_id,)
             )
@@ -158,7 +171,7 @@ class Database:
 
     async def get_user_by_telegram_id(self, telegram_id: int) -> Optional[User]:
         """Telegram ID orqali foydalanuvchini qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute(
                 "SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)
             )
@@ -167,14 +180,14 @@ class Database:
 
     async def get_all_users(self) -> List[User]:
         """Barcha foydalanuvchilar ro'yxatini qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute("SELECT * FROM users ORDER BY id DESC")
             rows = await cursor.fetchall()
             return [User.from_row(row) for row in rows]
 
     async def get_all_user_telegram_ids(self, only_active: bool = True) -> List[int]:
         """Broadcast uchun barcha foydalanuvchilarning Telegram ID larini qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             query = "SELECT telegram_id FROM users"
             if only_active:
                 query += " WHERE is_blocked = 0"
@@ -184,14 +197,14 @@ class Database:
 
     async def count_users(self) -> int:
         """Jami foydalanuvchilar sonini qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute("SELECT COUNT(*) as cnt FROM users")
             row = await cursor.fetchone()
             return row["cnt"] if row else 0
 
     async def block_user(self, telegram_id: int) -> None:
         """Foydalanuvchini bloklaydi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             await conn.execute(
                 "UPDATE users SET is_blocked = 1 WHERE telegram_id = ?", (telegram_id,)
             )
@@ -199,7 +212,7 @@ class Database:
 
     async def unblock_user(self, telegram_id: int) -> None:
         """Foydalanuvchi blokini bekor qiladi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             await conn.execute(
                 "UPDATE users SET is_blocked = 0 WHERE telegram_id = ?", (telegram_id,)
             )
@@ -211,7 +224,7 @@ class Database:
 
     async def add_admin(self, telegram_id: int, full_name: Optional[str] = None) -> None:
         """Yangi adminni qo'shadi (agar mavjud bo'lmasa)."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute(
                 "SELECT id FROM admins WHERE telegram_id = ?", (telegram_id,)
             )
@@ -230,14 +243,14 @@ class Database:
 
     async def get_all_admins(self) -> List[Admin]:
         """Barcha adminlar ro'yxatini qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute("SELECT * FROM admins ORDER BY id ASC")
             rows = await cursor.fetchall()
             return [Admin.from_row(row) for row in rows]
 
     async def is_admin_in_db(self, telegram_id: int) -> bool:
         """Berilgan Telegram ID admins jadvalida mavjudligini tekshiradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute(
                 "SELECT id FROM admins WHERE telegram_id = ?", (telegram_id,)
             )
@@ -250,7 +263,7 @@ class Database:
 
     async def add_package(self, name: str, uc_amount: int, price: float) -> int:
         """Yangi UC paketini qo'shadi va yaratilgan paket ID sini qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute(
                 """
                 INSERT INTO packages (name, uc_amount, price, is_active, created_at)
@@ -263,7 +276,7 @@ class Database:
 
     async def get_package(self, package_id: int) -> Optional[Package]:
         """ID orqali bitta paketni qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute(
                 "SELECT * FROM packages WHERE id = ?", (package_id,)
             )
@@ -272,7 +285,7 @@ class Database:
 
     async def get_all_packages(self, only_active: bool = False) -> List[Package]:
         """Barcha paketlar ro'yxatini qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             query = "SELECT * FROM packages"
             if only_active:
                 query += " WHERE is_active = 1"
@@ -297,7 +310,7 @@ class Database:
         new_uc_amount = uc_amount if uc_amount is not None else package.uc_amount
         new_price = price if price is not None else package.price
 
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             await conn.execute(
                 """
                 UPDATE packages
@@ -310,7 +323,7 @@ class Database:
 
     async def set_package_active(self, package_id: int, is_active: bool) -> None:
         """Paketni faol/nofaol holatga o'tkazadi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             await conn.execute(
                 "UPDATE packages SET is_active = ? WHERE id = ?",
                 (1 if is_active else 0, package_id),
@@ -319,7 +332,7 @@ class Database:
 
     async def delete_package(self, package_id: int) -> None:
         """Paketni database'dan butunlay o'chiradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             await conn.execute("DELETE FROM packages WHERE id = ?", (package_id,))
             await conn.commit()
 
@@ -340,7 +353,7 @@ class Database:
         receipt_photo_id: Optional[str] = None,
     ) -> int:
         """Yangi buyurtma yaratadi va uning ID sini qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute(
                 """
                 INSERT INTO orders (
@@ -368,7 +381,7 @@ class Database:
 
     async def get_order(self, order_id: int) -> Optional[Order]:
         """ID orqali bitta buyurtmani qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute(
                 "SELECT * FROM orders WHERE id = ?", (order_id,)
             )
@@ -377,14 +390,14 @@ class Database:
 
     async def get_all_orders(self) -> List[Order]:
         """Barcha buyurtmalar ro'yxatini (yangi birinchi) qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute("SELECT * FROM orders ORDER BY id DESC")
             rows = await cursor.fetchall()
             return [Order.from_row(row) for row in rows]
 
     async def get_orders_by_status(self, status: str) -> List[Order]:
         """Berilgan holatdagi barcha buyurtmalarni qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute(
                 "SELECT * FROM orders WHERE status = ? ORDER BY id DESC", (status,)
             )
@@ -393,7 +406,7 @@ class Database:
 
     async def get_orders_by_user(self, telegram_id: int) -> List[Order]:
         """Bitta foydalanuvchining barcha buyurtmalarini qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute(
                 "SELECT * FROM orders WHERE telegram_id = ? ORDER BY id DESC",
                 (telegram_id,),
@@ -403,7 +416,7 @@ class Database:
 
     async def update_order_status(self, order_id: int, status: str) -> None:
         """Buyurtma holatini yangilaydi (pending/confirmed/cancelled/completed)."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             await conn.execute(
                 """
                 UPDATE orders
@@ -416,7 +429,7 @@ class Database:
 
     async def set_order_receipt(self, order_id: int, receipt_photo_id: str) -> None:
         """Buyurtmaga chek rasmi ID sini biriktiradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             await conn.execute(
                 "UPDATE orders SET receipt_photo_id = ? WHERE id = ?",
                 (receipt_photo_id, order_id),
@@ -429,7 +442,7 @@ class Database:
 
     async def get_today_income(self) -> float:
         """Bugungi kun uchun tasdiqlangan/bajarilgan buyurtmalar daromadini qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute(
                 """
                 SELECT COALESCE(SUM(price), 0) as total
@@ -443,7 +456,7 @@ class Database:
 
     async def get_today_orders_count(self) -> int:
         """Bugun tushgan buyurtmalar sonini qaytaradi (barcha holatlar)."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute(
                 """
                 SELECT COUNT(*) as cnt
@@ -456,7 +469,7 @@ class Database:
 
     async def get_total_income(self) -> float:
         """Barcha vaqt uchun tasdiqlangan/bajarilgan buyurtmalar jami daromadini qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute(
                 """
                 SELECT COALESCE(SUM(price), 0) as total
@@ -469,7 +482,7 @@ class Database:
 
     async def get_total_orders_count(self) -> int:
         """Barcha vaqt uchun jami buyurtmalar sonini qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute("SELECT COUNT(*) as cnt FROM orders")
             row = await cursor.fetchone()
             return row["cnt"] if row else 0
@@ -480,7 +493,7 @@ class Database:
 
     async def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Berilgan kalit bo'yicha sozlama qiymatini qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute(
                 "SELECT value FROM settings WHERE key = ?", (key,)
             )
@@ -489,7 +502,7 @@ class Database:
 
     async def set_setting(self, key: str, value: str) -> None:
         """Sozlama qiymatini o'rnatadi yoki yangilaydi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             await conn.execute(
                 """
                 INSERT INTO settings (key, value)
@@ -502,7 +515,7 @@ class Database:
 
     async def get_all_settings(self) -> List[Settings]:
         """Barcha sozlamalar ro'yxatini qaytaradi."""
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             cursor = await conn.execute("SELECT * FROM settings")
             rows = await cursor.fetchall()
             return [Settings.from_row(row) for row in rows]
