@@ -1,3 +1,5 @@
+# 📁 JOYLASHUV: aggressor_uc_bot/handlers/admin/orders.py
+# ⚠ MAVJUD FAYL — to'liq almashtiring
 """
 AGGRESSOR UC BOT - Admin buyurtmalar handleri.
 
@@ -10,6 +12,7 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
 from database import db
+from database.models import Order
 from handlers.admin.panel import IsAdminFilter
 from keyboards.admin_kb import (
     back_to_admin_panel_keyboard,
@@ -17,6 +20,7 @@ from keyboards.admin_kb import (
     order_send_uc_keyboard,
     orders_filter_keyboard,
 )
+from keyboards.user_kb import rating_keyboard
 from utils.helpers import format_datetime_display, format_price, get_username_display
 from utils.texts import (
     NO_ORDERS_FOUND,
@@ -29,6 +33,7 @@ from utils.texts import (
     ORDER_PAYMENT_CONFIRMED_USER,
     ORDERS_LIST_HEADER,
 )
+from utils.texts_new import RATING_REQUEST_MESSAGE
 
 router = Router(name="admin_orders")
 router.message.filter(IsAdminFilter())
@@ -39,7 +44,7 @@ def _build_order_detail_text(order) -> str:
     """Buyurtma tafsilotlarini admin uchun matn ko'rinishida tayyorlaydi."""
     username_display = get_username_display(order.username, order.telegram_id)
     return ORDER_DETAIL_ADMIN.format(
-        order_id=order.id,
+        order_id=Order.ORDER_NUMBER_OFFSET + order.id,
         username=username_display,
         telegram_id=order.telegram_id,
         pubg_uid=order.pubg_uid,
@@ -81,9 +86,9 @@ async def callback_orders_by_status(callback: CallbackQuery) -> None:
         text = _build_order_detail_text(order)
 
         if status == "pending":
-            keyboard = order_action_keyboard(order.id)
+            keyboard = order_action_keyboard(order.id, order.telegram_id)
         elif status == "confirmed":
-            keyboard = order_send_uc_keyboard(order.id)
+            keyboard = order_send_uc_keyboard(order.id, order.telegram_id)
         else:
             keyboard = None
 
@@ -125,20 +130,23 @@ async def callback_confirm_order(callback: CallbackQuery) -> None:
         return
 
     await db.update_order_status(order_id, "confirmed")
+    await db.add_admin_log(callback.from_user.id, "confirm_order", f"order_id={order_id}")
 
     try:
         await callback.bot.send_message(
             chat_id=order.telegram_id,
-            text=ORDER_PAYMENT_CONFIRMED_USER.format(order_id=order.id),
+            text=ORDER_PAYMENT_CONFIRMED_USER.format(order_id=Order.ORDER_NUMBER_OFFSET + order.id),
         )
     except Exception:
         pass
 
     updated_order = await db.get_order(order_id)
     new_text = _build_order_detail_text(updated_order)
-    await _update_message_keyboard(callback, new_text, order_send_uc_keyboard(order_id))
+    await _update_message_keyboard(
+        callback, new_text, order_send_uc_keyboard(order_id, order.telegram_id)
+    )
 
-    await callback.answer(ORDER_CONFIRMED_ADMIN.format(order_id=order_id))
+    await callback.answer(ORDER_CONFIRMED_ADMIN.format(order_id=Order.ORDER_NUMBER_OFFSET + order_id))
 
 
 @router.callback_query(F.data.startswith("cancel_order_admin:"))
@@ -156,11 +164,12 @@ async def callback_cancel_order_admin(callback: CallbackQuery) -> None:
         return
 
     await db.update_order_status(order_id, "cancelled")
+    await db.add_admin_log(callback.from_user.id, "cancel_order", f"order_id={order_id}")
 
     try:
         await callback.bot.send_message(
             chat_id=order.telegram_id,
-            text=ORDER_CANCELLED_USER.format(order_id=order.id),
+            text=ORDER_CANCELLED_USER.format(order_id=Order.ORDER_NUMBER_OFFSET + order.id),
         )
     except Exception:
         pass
@@ -169,7 +178,7 @@ async def callback_cancel_order_admin(callback: CallbackQuery) -> None:
     new_text = _build_order_detail_text(updated_order)
     await _update_message_keyboard(callback, new_text, None)
 
-    await callback.answer(ORDER_CANCELLED_ADMIN.format(order_id=order_id))
+    await callback.answer(ORDER_CANCELLED_ADMIN.format(order_id=Order.ORDER_NUMBER_OFFSET + order_id))
 
 
 @router.callback_query(F.data.startswith("uc_sent:"))
@@ -187,11 +196,20 @@ async def callback_uc_sent(callback: CallbackQuery) -> None:
         return
 
     await db.update_order_status(order_id, "completed")
+    await db.add_admin_log(callback.from_user.id, "uc_sent", f"order_id={order_id}")
+
+    order_number = Order.ORDER_NUMBER_OFFSET + order.id
 
     try:
         await callback.bot.send_message(
             chat_id=order.telegram_id,
-            text=ORDER_COMPLETED_USER.format(order_id=order.id),
+            text=ORDER_COMPLETED_USER.format(order_id=order_number),
+        )
+        # ---- YANGI: Reyting so'rovi yuborish ----
+        await callback.bot.send_message(
+            chat_id=order.telegram_id,
+            text=RATING_REQUEST_MESSAGE.format(order_number=f"#{order_number}"),
+            reply_markup=rating_keyboard(order.id),
         )
     except Exception:
         pass
@@ -200,4 +218,4 @@ async def callback_uc_sent(callback: CallbackQuery) -> None:
     new_text = _build_order_detail_text(updated_order)
     await _update_message_keyboard(callback, new_text, None)
 
-    await callback.answer(ORDER_COMPLETED_ADMIN.format(order_id=order_id))
+    await callback.answer(ORDER_COMPLETED_ADMIN.format(order_id=order_number))
